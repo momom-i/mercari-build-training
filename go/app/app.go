@@ -11,12 +11,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
 )
 
-var errImageNotFound = errors.New("image not found")
+var (
+	errImageNotFound = errors.New("image not found")
+	errItemNotFound  = errors.New("item not found")
+)
 
 var validate = validator.New(validator.WithRequiredStructEnabled())
 
@@ -150,6 +154,58 @@ func (s *Handlers) AddItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type GetItemRequest struct {
+	ItemID int // path value
+}
+
+type GetItemResponse struct {
+	Item Item `json:"item"`
+}
+
+// parseGetItemRequest parses and validates the request to get an item.
+func parseGetItemRequest(r *http.Request) (*GetItemRequest, error) {
+	if r.PathValue("itemID") == "" {
+		return nil, errors.New("itemID is required")
+	}
+	itemID, err := strconv.Atoi(r.PathValue("itemID"))
+	if err != nil {
+		return nil, err
+	}
+
+	req := &GetItemRequest{
+		ItemID: itemID, // from path parameter
+	}
+
+	return req, nil
+}
+
+// GetItem is a handler to return an item for GET /items/{itemID} .
+func (s *Handlers) GetItem(w http.ResponseWriter, r *http.Request) {
+	req, err := parseGetItemRequest(r)
+	if err != nil {
+		slog.Warn("failed to parse get item request: ", "error", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	item, err := s.itemRepo.Read(context.Background(), req.ItemID)
+	if err != nil {
+		if errors.Is(err, errItemNotFound) {
+			slog.Warn("not found an item: ", "itemID", req.ItemID)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	resp := GetItemResponse{Item: item}
+	err = json.NewEncoder(w).Encode(resp)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
 type GetImageRequest struct {
 	FileName string // path value
 }
@@ -236,6 +292,7 @@ type items struct {
 type ItemRepository interface {
 	Insert(ctx context.Context, item *Item) error
 	ReadAll(ctx context.Context) ([]Item, error)
+	Read(ctx context.Context, itemID int) (Item, error)
 }
 
 // itemRepository is an implementation of ItemRepository using JSON files.
@@ -270,6 +327,7 @@ func (i *itemRepository) Insert(ctx context.Context, item *Item) error {
 		return err
 	}
 
+	item.ID = len(data.Items)
 	// Add new item to the list
 	data.Items = append(data.Items, *item)
 
@@ -294,7 +352,25 @@ func (i *itemRepository) Insert(ctx context.Context, item *Item) error {
 
 // ReadAll read all Item slices from the JSON file.
 func (i *itemRepository) ReadAll(ctx context.Context) ([]Item, error) {
-	file, err := os.OpenFile(i.fileName, os.O_RDWR, 0644)
+	return fetchItemsFromJSON(i.fileName)
+}
+
+// Read read an Item from the JSON file.
+func (i *itemRepository) Read(ctx context.Context, itemID int) (Item, error) {
+	items, err := fetchItemsFromJSON(i.fileName)
+	if err != nil {
+		return Item{}, err
+	}
+	for _, item := range items {
+		if item.ID == itemID {
+			return item, nil
+		}
+	}
+	return Item{}, errItemNotFound
+}
+
+func fetchItemsFromJSON(fileName string) ([]Item, error) {
+	file, err := os.OpenFile(fileName, os.O_RDWR, 0644)
 	if err != nil {
 		return nil, err
 	}
@@ -386,6 +462,7 @@ func (s Server) Run() int {
 	mux.HandleFunc("GET /", h.Hello)
 	mux.HandleFunc("POST /items", h.AddItem)
 	mux.HandleFunc("GET /items", h.GetItems)
+	mux.HandleFunc("GET /items/{itemID}", h.GetItem)
 	mux.HandleFunc("GET /images/{filename}", h.GetImage)
 
 	// start the server
