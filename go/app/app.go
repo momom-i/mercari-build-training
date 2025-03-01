@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,10 +63,26 @@ func (s *Handlers) GetItems(w http.ResponseWriter, r *http.Request) {
 type AddItemRequest struct {
 	Name     string `form:"name" validate:"required"`
 	Category string `form:"category" validate:"required"`
+	Image    []byte `validate:"required,image-file"`
 }
 
 type AddItemResponse struct {
 	Message string `json:"message"`
+}
+
+func imageFileValidator(fl validator.FieldLevel) bool {
+	buf := fl.Field().Interface().([]byte)
+	if len(buf) == 0 {
+		return false
+	}
+
+	contentType := http.DetectContentType(buf)
+	switch contentType {
+	case "image/jpeg", "image/png":
+		return true
+	default:
+		return false
+	}
 }
 
 // parseAddItemRequest parses and validates the request to add an item.
@@ -74,6 +91,19 @@ func parseAddItemRequest(r *http.Request) (*AddItemRequest, error) {
 		Name:     r.FormValue("name"),
 		Category: r.FormValue("category"),
 	}
+
+	file, _, err := r.FormFile("image")
+	if err != nil {
+		return nil, errors.New("image is required")
+	}
+	defer file.Close()
+
+	// Read the contents of the file into memory
+	image, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+	req.Image = image
 
 	// validate the request
 	if err := validate.Struct(req); err != nil {
@@ -94,8 +124,13 @@ func (s *Handlers) AddItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// STEP 4-4: add an implementation to store an image
+	if err := saveImageFile(s.imgDirPath, req.Image); err != nil {
+		slog.Error("failed to save image file: ", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	item := &Item{Name: req.Name, Category: req.Category}
+	item := &Item{Name: req.Name, Category: req.Category, Image: req.Image}
 	message := fmt.Sprintf("item received: [Name] %s, [Category] %s", item.Name, item.Category)
 	slog.Info(message)
 
@@ -187,6 +222,7 @@ type Item struct {
 	ID       int    `db:"id" json:"id"`
 	Name     string `db:"name" json:"name"`
 	Category string `db:"category" json:"category"`
+	Image    []byte `db:"image" json:"image"`
 }
 
 type items struct {
@@ -293,6 +329,20 @@ func simpleCORSMiddleware(next http.Handler, origin string, methods []string) ht
 	})
 }
 
+func saveImageFile(imgDirPath string, imageBytes []byte) error {
+	hash := sha256.Sum256(imageBytes)
+	hashedFileName := fmt.Sprintf("%x.jpg", hash)
+
+	if err := os.MkdirAll(imgDirPath, os.ModePerm); err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(filepath.Join(imgDirPath, hashedFileName), imageBytes, 0644); err != nil {
+		return err
+	}
+	return nil
+}
+
 func simpleLoggerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("request received", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr, "user_agent", r.UserAgent())
@@ -321,6 +371,9 @@ func (s Server) Run() int {
 	if !found {
 		frontURL = "http://localhost:3000"
 	}
+
+	// set up validator
+	validate.RegisterValidation("image-file", imageFileValidator)
 
 	// STEP 5-1: set up the database connection
 
