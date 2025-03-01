@@ -5,14 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/go-playground/validator/v10"
 )
 
 var errImageNotFound = errors.New("image not found")
+
+var validate = validator.New(validator.WithRequiredStructEnabled())
 
 type Handlers struct {
 	// imgDirPath is the path to the directory storing images.
@@ -35,7 +40,8 @@ func (s *Handlers) Hello(w http.ResponseWriter, r *http.Request) {
 }
 
 type AddItemRequest struct {
-	Name string `form:"name"`
+	Name     string `form:"name" validate:"required"`
+	Category string `form:"category" validate:"required"`
 }
 
 type AddItemResponse struct {
@@ -45,12 +51,13 @@ type AddItemResponse struct {
 // parseAddItemRequest parses and validates the request to add an item.
 func parseAddItemRequest(r *http.Request) (*AddItemRequest, error) {
 	req := &AddItemRequest{
-		Name: r.FormValue("name"),
+		Name:     r.FormValue("name"),
+		Category: r.FormValue("category"),
 	}
 
 	// validate the request
-	if req.Name == "" {
-		return nil, errors.New("name is required")
+	if err := validate.Struct(req); err != nil {
+		return nil, err
 	}
 
 	return req, nil
@@ -68,8 +75,8 @@ func (s *Handlers) AddItem(w http.ResponseWriter, r *http.Request) {
 
 	// STEP 4-4: add an implementation to store an image
 
-	item := &Item{Name: req.Name}
-	message := fmt.Sprintf("item received: %s", item.Name)
+	item := &Item{Name: req.Name, Category: req.Category}
+	message := fmt.Sprintf("item received: [Name] %s, [Category] %s", item.Name, item.Category)
 	slog.Info(message)
 
 	// STEP 4-2: add an implementation to store an image
@@ -157,8 +164,13 @@ func (s *Handlers) buildImagePath(imageFileName string) (string, error) {
 }
 
 type Item struct {
-	ID   int    `db:"id"`
-	Name string `db:"name"`
+	ID       int    `db:"id" json:"id"`
+	Name     string `db:"name" json:"name"`
+	Category string `db:"category" json:"category"`
+}
+
+type items struct {
+	Items []Item `json:"items"`
 }
 
 // Please run `go generate ./...` to generate the mock implementation
@@ -183,6 +195,42 @@ func NewItemRepository() ItemRepository {
 // Insert inserts an item into the JSON file.
 func (i *itemRepository) Insert(ctx context.Context, item *Item) error {
 	// STEP 4-1: add an implementation to store an item
+	file, err := os.OpenFile(i.fileName, os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Read the file content
+	bytes, err := io.ReadAll(file)
+	if err != nil {
+		return err
+	}
+
+	// Unmarshal the JSON data into itemsData struct
+	data := &items{}
+	if err := json.Unmarshal(bytes, data); err != nil {
+		return err
+	}
+
+	// Add new item to the list
+	data.Items = append(data.Items, *item)
+
+	// Seek to the beginning of the file
+	if _, err := file.Seek(0, 0); err != nil {
+		return err
+	}
+
+	// Marshal the updated itemsData back to JSON
+	newBytes, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	// Write the updated JSON data back to the file
+	if err := os.WriteFile(i.fileName, newBytes, 0644); err != nil {
+		return err
+	}
 
 	return nil
 }
