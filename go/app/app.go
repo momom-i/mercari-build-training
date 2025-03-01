@@ -39,6 +39,26 @@ func (s *Handlers) Hello(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type GetItemsResponse struct {
+	Items []Item `json:"items"`
+}
+
+// GetItems get all items for GET /items .
+func (s *Handlers) GetItems(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	items, err := s.itemRepo.ReadAll(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp := GetItemsResponse{Items: items}
+	err = json.NewEncoder(w).Encode(resp)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
 type AddItemRequest struct {
 	Name     string `form:"name" validate:"required"`
 	Category string `form:"category" validate:"required"`
@@ -179,6 +199,7 @@ type items struct {
 //go:generate go run go.uber.org/mock/mockgen -source=$GOFILE -package=${GOPACKAGE} -destination=./mock_$GOFILE
 type ItemRepository interface {
 	Insert(ctx context.Context, item *Item) error
+	ReadAll(ctx context.Context) ([]Item, error)
 }
 
 // itemRepository is an implementation of ItemRepository using JSON files.
@@ -233,6 +254,27 @@ func (i *itemRepository) Insert(ctx context.Context, item *Item) error {
 	}
 
 	return nil
+}
+
+// ReadAll read all Item slices from the JSON file.
+func (i *itemRepository) ReadAll(ctx context.Context) ([]Item, error) {
+	file, err := os.OpenFile(i.fileName, os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Read the file content
+	bytes, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+
+	// Unmarshal the JSON data into itemsData struct
+	data := &items{}
+	if err := json.Unmarshal(bytes, data); err != nil {
+	}
+	return data.Items, nil
 }
 
 // middleware functions
@@ -290,6 +332,7 @@ func (s Server) Run() int {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", h.Hello)
 	mux.HandleFunc("POST /items", h.AddItem)
+	mux.HandleFunc("GET /items", h.GetItems)
 	mux.HandleFunc("GET /images/{filename}", h.GetImage)
 
 	// start the server
